@@ -1,0 +1,145 @@
+// Автор скрипту "Нескромний маркетолог" (Василь Волошин) | PPC.ROCKS
+// Якщо маєте ідеї чи треба розблокувати мерчант чи допомогти з рекламою пишіть https://t.me/xvoloshinx
+// Чат з профі по контекстній рекламі тут https://t.me/Google_Shopping
+// Канал з інсайтами по контексту https://t.me/neskromnyy_marketolog
+
+const SHEET_URL = "" //тут URL Вашої таблиці
+
+function main() {
+    const {accounts} = getSettings()
+    //Logger.log(accounts)
+    const results = []
+    for (let {id, conversions, excludeCampaigns} of accounts) {
+        const accountIterator = AdsManagerApp.accounts().withIds([id]).get();
+        if (!accountIterator.hasNext()) {
+            Logger.log(`Скрипт не може знайти акаунт ${id}`)
+            continue
+        }
+        AdsManagerApp.select(accountIterator.next())
+        const data = getStats(conversions, excludeCampaigns)
+        const accId = AdsApp.currentAccount().getCustomerId()
+        results.push([accId, ...data])
+    }
+    updateSpreadsheet(results)
+}
+
+function getSettings() {
+    const sh = SpreadsheetApp.openByUrl(SHEET_URL).getSheetByName('Settings')
+    if (!sh) throw `Скрипт не зміг знайти таблицю з налаштуваннями`
+    const arr = sh.getDataRange().getDisplayValues()
+    return {
+        accounts: arr.slice(1).map(([name, id, ga4, token, chat, rawConversions, currency, rawCampaigns]) => ({
+            id,
+            ga4,
+            token,
+            chat,
+            conversions: rawConversions.split(", "),
+            currency,
+            excludeCampaigns:rawCampaigns.split(", ")
+        }))
+    }
+}
+
+function updateSpreadsheet(arr) {
+    const ss = SpreadsheetApp.openByUrl(SHEET_URL);
+    const sh = ss.getSheetByName('Data')
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1)
+    const day = String(yesterday.getDate()).padStart(2, '0');
+    const month = String(yesterday.getMonth() + 1).padStart(2, '0'); // Months are 0-indexed
+    const newSheetName = `${day}.${month}`;
+
+    if (!ss.getSheetByName(newSheetName)) {
+        sh.copyTo(ss).setName(newSheetName);
+    }
+    const tmp = sh.getDataRange().getValues()
+    if (tmp.length > 1) sh.getRange(2, 1, tmp.length - 1, tmp[0].length).clear()
+    if (arr.length == 0) return
+    sh.getRange(2, 1, arr.length, arr[0].length).setValues(arr)
+}
+
+function getStats(conversions, excludeCampaigns) {
+    const days = 7
+    const period2 = getStatByPeriod(days, 1, conversions, excludeCampaigns)
+    const period1 = getStatByPeriod(days * 2, 1 + days, conversions, excludeCampaigns)
+    const fields = ['revenue', 'roas', 'purchase', 'check', 'cpa', 'custom', 'spend']
+    return fields.map(i => ([period1[i], period2[i]])).flat()
+}
+
+function getStatByPeriod(startDay, endDay, conversions, excludeCampaigns) {
+    const [start, end] = getDates(startDay, endDay)
+    Logger.log(excludeCampaigns)
+    const purchases = getPurchases(start, end, excludeCampaigns)
+    let obj = {
+        custom: getConversion(start, end, conversions),
+        roas: 0,
+        check: 0,
+        cpa: 0,
+        spend: 0,
+        ...purchases
+    }
+    const report = AdsApp.report(`SELECT metrics.cost_micros,
+                                         metrics.conversions,
+                                         metrics.impressions,
+                                         metrics.clicks,
+                                         metrics.conversions,
+                                         metrics.conversions_value,
+                                         campaign.id
+                                  FROM campaign
+                                  WHERE segments.date >= '${start}'
+                                    AND segments.date <= '${end}'`)
+    for (let row of report.rows()) {
+        if (excludeCampaigns.includes(row['campaign.id'].toString())) continue
+        //obj.revenue += parseFloat(row['metrics.conversions_value'])
+        obj.spend += costMicros(row['metrics.cost_micros'])
+        //obj.purchase += parseFloat(row['metrics.conversions'])
+    }
+    obj.roas = obj.spend == 0 ? 0 : obj.revenue * 100 / obj.spend
+    obj.check = obj.purchase == 0 ? 0 : obj.revenue / obj.purchase
+    obj.cpa = obj.purchase == 0 ? 0 : obj.spend / obj.purchase
+    return obj
+}
+
+function getPurchases(start, end, excludeCampaigns){
+    let obj = {purchase:0,revenue:0}
+    const report = AdsApp.report(`SELECT segments.conversion_action_category, metrics.conversions, metrics.conversions_value, campaign.id
+                                  FROM campaign
+                                  WHERE segments.date >= '${start}'
+                                    AND segments.date <= '${end}' AND segments.conversion_action_category='PURCHASE' `)
+    let count = 0
+    for (let row of report.rows()) {
+        Logger.log(row)
+        if (excludeCampaigns.includes(row['campaign.id'].toString())) continue
+        obj.revenue += parseFloat(row['metrics.conversions_value'])
+        obj.purchase += parseFloat(row['metrics.conversions'])
+    }
+
+    return obj
+}
+
+
+function getDates(startDay, endDay) {
+    const start = Utilities.formatDate(new Date(Date.now() - startDay * 86400000), AdsApp.currentAccount().getTimeZone(), "yyyy-MM-dd")
+    const end = Utilities.formatDate(new Date(Date.now() - endDay * 86400000), AdsApp.currentAccount().getTimeZone(), "yyyy-MM-dd")
+    return [start, end]
+}
+
+function getConversion(start, end, conversions) {
+    const report = AdsApp.report(`SELECT segments.conversion_action_name, metrics.all_conversions
+                                  FROM customer
+                                  WHERE segments.date >= '${start}'
+                                    AND segments.date <= '${end}' `)
+    let count = 0
+    for (let row of report.rows()) {
+        const conv = row['segments.conversion_action_name']
+        if (!conversions.includes(conv)) continue
+        count += parseFloat(row['metrics.all_conversions'])
+    }
+
+    return count
+}
+
+function costMicros(cost) {
+    return parseInt(cost || 0) / 1000000
+}
+
