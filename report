@@ -7,7 +7,7 @@ const SHEET_URL = "" //тут URL Вашої таблиці
 
 function main() {
     const {accounts} = getSettings()
-    //Logger.log(accounts)
+    Logger.log(accounts)
     const results = []
     for (let {id, conversions, excludeCampaigns} of accounts) {
         const accountIterator = AdsManagerApp.accounts().withIds([id]).get();
